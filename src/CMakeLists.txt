@@ -1,0 +1,15 @@
+mg_cc_executable(
+    NAME
+        bvh
+    SRCS
+        main.cpp
+    COPTS
+        ${CPP_FLAGS}
+    DEPS
+        glm
+        SDL2
+        ${PLATFORM_LIB}
+    DEFS
+        GLM_FORCE_DEPTH_ZERO_TO_ONE
+        GLM_FORCE_LEFT_HANDED
+)
