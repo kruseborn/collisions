@@ -12,10 +12,6 @@
 #include <stdio.h>
 #include <string>
 #include <vector>
-
-
-
-
 #undef main
 struct AABB {
   glm::vec3 min = {FLT_MAX, FLT_MAX, FLT_MAX};
@@ -38,7 +34,7 @@ AABB Union(const AABB &a, glm::vec3 point) {
   return ret;
 }
 
-bool TestAABBAABB(AABB a, AABB b) {
+bool checkOverlap(AABB a, AABB b) {
   // Exit with no intersection if separated along an axis
   if (a.max[0] < b.min[0] || a.min[0] > b.max[0])
     return false;
@@ -58,68 +54,12 @@ glm::vec3 aabbCenter(AABB bounds) {
   return 0.5f * bounds.min + 0.5f * bounds.max;
 }
 
-// struct Node {
-//  enum Type { LEAF, NODE };
-//  Node *left, *right;
-//  AABB aabb;
-//  Type type;
-//};
-//
-// uint32_t partitionObjects(Object *objects, const uint32_t nrObjects) {
-//  AABB centerBounds = {{FLT_MAX, FLT_MAX, FLT_MAX}, {-FLT_MAX, -FLT_MAX, -FLT_MAX}};
-//  for (uint32_t i = 0; i < nrObjects; i++)
-//    centerBounds = Union(centerBounds, aabbCenter(objects[i].aabb));
-//  int currentAxis = MaximumExtent(centerBounds);
-//
-//  int mid = nrObjects >> 1;
-//  float axisMiddle = (centerBounds.min[currentAxis] + centerBounds.max[currentAxis]) / 2;
-//
-//  Object *middlePtr = std::partition(objects, objects + nrObjects, [currentAxis, axisMiddle](const Object &object) {
-//    return aabbCenter(object.aabb)[currentAxis] < axisMiddle;
-//  });
-//
-//  mid = uint32_t(middlePtr - objects);
-//  if (mid != 0 && mid != nrObjects) {
-//    return mid;
-//  }
-//  std::sort(objects, objects + nrObjects, [currentAxis](const Object &a, const Object &b) {
-//    return aabbCenter(a.aabb)[currentAxis] < aabbCenter(b.aabb)[currentAxis];
-//  });
-//  return nrObjects >> 1;
-//}
-
 #ifdef _WIN32
 #include <intrin.h>
 
 #define SCREEN_WIDTH 1000
 #define SCREEN_HEIGHT 1000
 
-SDL_Rect getRect(AABB aabb) {
-  SDL_Rect rec = {int(aabb.min.x), int(aabb.min.y), int(aabb.max.x - aabb.min.x), int(aabb.max.y - aabb.min.y)};
-  rec.x *= 10;
-  rec.y *= 10;
-  rec.w *= 10;
-  rec.h *= 10;
-  return rec;
-}
-
-// void renderNode(SDL_Renderer *renderer, Node *node) {
-//  SDL_Rect rec = getRect(node->aabb);
-//  if (node->type == Node::LEAF) {
-//    SDL_SetRenderDrawColor(renderer, 0, 150, 0, 255);
-//    SDL_RenderFillRect(renderer, &rec);
-//    SDL_SetRenderDrawColor(renderer, 150, 0, 0, 255);
-//    SDL_RenderDrawRect(renderer, &rec);
-//  } else {
-//    SDL_SetRenderDrawColor(renderer, 150, 0, 0, 255);
-//    SDL_RenderDrawRect(renderer, &rec);
-//
-//    renderNode(renderer, node->left);
-//    renderNode(renderer, node->right);
-//  }
-//}
-
-// void renderTree(Node *tree);
 
 namespace timer {
 typedef std::chrono::time_point<std::chrono::high_resolution_clock> Time;
@@ -221,192 +161,270 @@ inline int32_t commonPrefix(std::vector<uint32_t> &sortedMortonCodes, uint32_t c
   return sortedMortonCodes[i] ^ sortedMortonCodes[j];
 }
 
-glm::uvec2 determineRange(std::vector<uint32_t> &sortedMortonCodes, uint32_t count, uint32_t index) {
-  int32_t commonPrefixLeft = commonPrefix(sortedMortonCodes, count, index, index - 1);
-  int32_t commonPrefixRight = commonPrefix(sortedMortonCodes, count, index, index + 1);
-
-  // find direction of the range
-  int32_t d = commonPrefixLeft > commonPrefixRight ? -1 : 1;
-  int32_t commonPrefixMin = std::min(commonPrefixLeft, commonPrefixRight);
-
-  // move to outside range
-  int32_t rangeMax = 2;
-  while (commonPrefix(sortedMortonCodes, count, index, index + d * rangeMax) > commonPrefixMin) {
-    rangeMax *= 2;
-  }
-
-  // binary search to find range index
-  int32_t rangeLength = 0;
-  while (rangeMax >= 1) {
-    bool larger = commonPrefix(sortedMortonCodes, count, index, index + (rangeLength + rangeMax) * d) > commonPrefixMin;
-    rangeLength += larger ? rangeMax : 0;
-    rangeMax = rangeMax >> 1;
-  }
-
-  int i = index;
-  d = (commonPrefix(sortedMortonCodes, count, i, i + 1) - commonPrefix(sortedMortonCodes, count, i, i - 1)) > 0 ? 1
-                                                                                                                : -1;
-  int commonPrefixMin2 = commonPrefix(sortedMortonCodes, count, i, i - d);
-  int l_max = 2;
-  while (commonPrefix(sortedMortonCodes, count, i, i + d * l_max) > commonPrefixMin2) {
-    l_max *= 2;
-  }
-
-  int l = 0;
-  int t = l_max;
-  do {
-    t = (t + 1) >> 1; // exponential decrease
-    if (commonPrefix(sortedMortonCodes, count, i, i + d * (l + t)) > commonPrefixMin) {
-      l += t;
-    }
-  } while (t > 1);
-
-  if (l != rangeLength)
-    printf("here we are\n");
-  int32_t j = index + (rangeLength * d);
-  glm::uvec2 range = d > 0 ? glm::uvec2(index, j) : glm::uvec2(j, index);
-  return range;
-}
 struct Node {
-  uint32_t objectId;
   Node *childA, *childB;
-  Node *parent;
   AABB aabb;
 };
 
-void updateAABBFromBottom(Node *leafNode) {
-  Node *stack[32] = {};
-  uint32_t top = 0;
-  stack[top++] = leafNode->parent;
-  AABB aabb = leafNode->aabb;
-  while (top > 0) {
-    Node *node = stack[--top];
-    node->aabb = Union(node->aabb, aabb);
-    aabb = node->aabb;
-    if (node->parent != nullptr) {
-      assert(top < 32);
-      stack[top++] = leafNode->parent;
+bool isLeaf(Node *node) {
+  return node->childA == nullptr && node->childB == nullptr;
+}
+
+std::vector<AABB> traverseIterative(Node *root, AABB &queryAABB) {
+  std::vector<AABB> res;
+
+  // Allocate traversal stack from thread-local memory,
+  // and push NULL to indicate that there are no postponed nodes.
+  Node *stack[64];
+  Node **stackPtr = stack;
+  *stackPtr++ = NULL; // push
+
+  // Traverse nodes starting from the root.
+  Node *node = root;
+  do {
+    // Check each child node for overlap.
+    Node *childL = node->childA;
+    Node *childR = node->childB;
+    bool overlapL = checkOverlap(queryAABB, childL->aabb);
+    bool overlapR = checkOverlap(queryAABB, childR->aabb);
+
+    // Query overlaps a leaf node => report collision.
+    if (overlapL && isLeaf(childL))
+      res.push_back(childL->aabb);
+
+    if (overlapR && isLeaf(childR))
+      res.push_back(childR->aabb);
+
+    // Query overlaps an internal node => traverse.
+    bool traverseL = (overlapL && !isLeaf(childL));
+    bool traverseR = (overlapR && !isLeaf(childR));
+
+    if (!traverseL && !traverseR)
+      node = *--stackPtr; // pop
+    else {
+      node = (traverseL) ? childL : childR;
+      if (traverseL && traverseR)
+        *stackPtr++ = childR; // push
+    }
+  } while (node != NULL);
+
+  return res;
+}
+struct Node4 {
+  int32_t children[4];
+  Node *leafs[4];
+  AABB aabb[4];
+  int count;
+};
+
+struct Qbvh {
+  std::vector<Node4> nodes;
+};
+
+
+
+std::vector<AABB> traverseIterative4(Qbvh *bvh, AABB &queryAABB) {
+  std::vector<AABB> res;
+
+  // Allocate traversal stack from thread-local memory,
+  // and push NULL to indicate that there are no postponed nodes.
+  Node4 *stack[64];
+  Node4 **stackPtr = stack;
+  *stackPtr++ = nullptr; // push
+  *stackPtr++ = &bvh->nodes[0]; // push
+
+  // Traverse nodes starting from the root.
+  bool overlap[4] = {};
+  bool shouldTraverse[4] = {};
+
+  while (true) {
+    Node4 *node = *--stackPtr; // pop
+    if (node == nullptr)
+      break;
+
+    for (int i = 0; i < node->count; i++) {
+      overlap[i] = checkOverlap(queryAABB, node->aabb[i]);
+    }
+
+    for (int i = 0; i < node->count; i++) {
+      if (overlap[i] && node->leafs[i])
+        res.push_back(node->leafs[i]->aabb);
+    }
+
+    for (int i = 0; i < node->count; i++) {
+      if (overlap[i] && !node->leafs[i]) {
+        *stackPtr++ = &bvh->nodes[node->children[i]]; // push
+      }
     }
   }
+  return res;
 }
 
-Node *generateHirarchy(std::vector<uint32_t> &sortedMortonCodes, std::vector<AABB> &sortedObjectsIds,
-                       uint32_t count) {
-  std::vector<Node> leafNodes(count);
-  std::vector<Node> internalNodes(count - 1);
+Node *generateHirarchy(std::vector<uint32_t> &sortedMortonCodes, std::vector<AABB> &sortedObjectAABBs, int32_t first,
+                       int32_t last) {
 
-  for (int i = 0; i < count; i++)
-    leafNodes[i].aabb = sortedObjectsIds[i];
-
-  for (uint32_t i = 0; i < count - 1; i++) {
-    glm::vec2 range = determineRange(sortedMortonCodes, count, i);
-    uint32_t split = findSplit(sortedMortonCodes, range.x, range.y);
-    Node *childA;
-    if (split == range.x)
-      childA = &leafNodes[split];
-    else
-      childA = &internalNodes[split];
-
-    Node *childB;
-    if (split + 1 == range.y)
-      childB = &leafNodes[split + 1];
-    else
-      childB = &internalNodes[split + 1];
-
-    internalNodes[i].childA = childA;
-    internalNodes[i].childB = childB;
-    childA->parent = &internalNodes[i];
-    childB->parent = &internalNodes[i];
+  if (first == last) {
+    Node *node = new Node{};
+    node->aabb = sortedObjectAABBs[first];
+    return node;
   }
+  int split = findSplit(sortedMortonCodes, first, last);
+  Node *childA = generateHirarchy(sortedMortonCodes, sortedObjectAABBs, first, split);
+  Node *childB = generateHirarchy(sortedMortonCodes, sortedObjectAABBs, split + 1, last);
 
-  // update bvh
-  for (int i = 0; i < count; i++) {
-    updateAABBFromBottom(&leafNodes[i]);
-  }
-
-  return &internalNodes[0];
+  Node *node = new Node{};
+  node->aabb = Union(childA->aabb, childB->aabb);
+  node->childA = childA;
+  node->childB = childB;
+  return node;
 }
 
-// void traverseIterative(Node *root, AABB &queryAABB) {
-//  // Allocate traversal stack from thread-local memory,
-//  // and push NULL to indicate that there are no postponed nodes.
-//  Node* stack[64];
-//  Node **stackPtr = stack;
-//  *stackPtr++ = nullptr; // push
-//
-//  // Traverse nodes starting from the root.
-//  Node *node = root;
-//  do {
-//    // Check each child node for overlap.
-//    Node *childL = node->childA;
-//    Node *childR = node->childB;
-//    bool overlapL = (checkOverlap(queryAABB, bvh.getAABB(childL)));
-//    bool overlapR = (checkOverlap(queryAABB, bvh.getAABB(childR)));
-//
-//    // Query overlaps a leaf node => report collision.
-//    if (overlapL && bvh.isLeaf(childL))
-//      list.add(queryObjectIdx, bvh.getObjectIdx(childL));
-//
-//    if (overlapR && bvh.isLeaf(childR))
-//      list.add(queryObjectIdx, bvh.getObjectIdx(childR));
-//
-//    // Query overlaps an internal node => traverse.
-//    bool traverseL = (overlapL && !bvh.isLeaf(childL));
-//    bool traverseR = (overlapR && !bvh.isLeaf(childR));
-//
-//    if (!traverseL && !traverseR)
-//      node = *--stackPtr; // pop
-//    else {
-//      node = (traverseL) ? childL : childR;
-//      if (traverseL && traverseR)
-//        *stackPtr++ = childR; // push
-//    }
-//  } while (node != NULL);
-//}
 
+int constructQbvh(Qbvh *bvh, Node *node) {
+  Node *linearChildIndices[4];
+  AABB linearChildAabbs[4];
+  int childCount = 0;
+  
+  {
+    Node *currentNode = node->childA;
+    if (!isLeaf(currentNode)) {
+      linearChildIndices[childCount] = currentNode->childA;
+      linearChildAabbs[childCount] = currentNode->childA->aabb;
+      childCount++;
+      linearChildIndices[childCount] = currentNode->childB;
+      linearChildAabbs[childCount] = currentNode->childB->aabb;
+      childCount++;
+    } else {
+      linearChildIndices[childCount] = currentNode;
+      linearChildAabbs[childCount] = currentNode->aabb;
+      childCount++;
+    }
+  }
+  {
+    Node *currentNode = node->childB;
+    if (!isLeaf(currentNode)) {
+      linearChildIndices[childCount] = currentNode->childA;
+      linearChildAabbs[childCount] = currentNode->childA->aabb;
+      childCount++;
+      linearChildIndices[childCount] = currentNode->childB;
+      linearChildAabbs[childCount] = currentNode->childB->aabb;
+      childCount++;
+    } else {
+      linearChildIndices[childCount] = currentNode;
+      linearChildAabbs[childCount] = currentNode->aabb;
+      childCount++;
+    }
+  }
+  Node4 result = {};
+  result.count = childCount;
+  for (int i = 0; i < childCount; i++) {
+    result.aabb[i] = linearChildAabbs[i];
+  }
+  size_t currentNodeIndex = bvh->nodes.size();
+  bvh->nodes.push_back(result);
+  int32_t resultIndex = static_cast<int32_t>(currentNodeIndex + 1);
 
+  for (size_t i = 0; i < childCount; i++) {
+    if (isLeaf(linearChildIndices[i])) { // is leaf
+      bvh->nodes[currentNodeIndex].children[i] = -1;
+      bvh->nodes[currentNodeIndex].leafs[i] = linearChildIndices[i];
+    } else {
+      bvh->nodes[currentNodeIndex].children[i] = resultIndex;
+      resultIndex = constructQbvh(bvh, linearChildIndices[i]);
+    }
+  }
+  return resultIndex;
+}
 
-
-
-
+void renderTree(Node *tree, Qbvh *qbvh);
 
 int main() {
-  const int count = 4;
+  const int count = 100000;
   std::vector<glm::vec3> positions(count);
   std::vector<AABB> aabbs(count);
   std::vector<uint32_t> mortonCodes(count);
   for (int i = 0; i < count; i++) {
-    if (i == 0)
-      positions[i] = {0.1, 0.1, 0.1};
-    if (i == 1)
-      positions[i] = {0.1, 0.1, 0.9};
-    if (i == 2)
-      positions[i] = {0.1, 0.9, 0.9};
-    if (i == 3)
-      positions[i] = {0.9, 0.9, 0.9};
+    //if (i == 0)
+    //  positions[i] = {0.1, 0.1, 0.1};
+    //if (i == 1)
+    //  positions[i] = {0.5, 0.1, 0.1};
+    //if (i == 2)
+    //  positions[i] = {0.8, 0.1, 0.1};
+    //if (i == 3)
+    //  positions[i] = {0.9, 0.1, 0.1};
 
-    //positions[i].x = (rand() / float(RAND_MAX));
-    //positions[i].y = (rand() / float(RAND_MAX));
-    //positions[i].z = (rand() / float(RAND_MAX));
-    aabbs[i] = {{positions[i] - glm::vec3{0.05}}, {positions[i] + glm::vec3{0.05}}};
+    positions[i] = {rand() / float(RAND_MAX), rand() / float(RAND_MAX), 0.1};
+
+    aabbs[i] = {{positions[i] - glm::vec3{0.01}}, {positions[i] + glm::vec3{0.01}}};
     aabbs[i].position = positions[i];
     mortonCodes[i] = morton3D(positions[i].x, positions[i].y, positions[i].z);
     aabbs[i].morton = mortonCodes[i];
   }
   radixSort(mortonCodes.data(), aabbs.data(), mortonCodes.size());
-  Node *node = generateHirarchy(mortonCodes, aabbs, count);
+  Node *root = generateHirarchy(mortonCodes, aabbs, 0, count - 1);
 
-  //uint32_t mortonsortedArray[8] = {0b00001, 0b00010, 0b00100, 0b00101, 0b10011, 0b11000, 0b11001, 0b11110};
-  //uint32_t idssortedArray[8] = {0, 1, 2, 3, 4, 5, 6, 7};
-  //std::vector<uint32_t> a = {mortonsortedArray, mortonsortedArray + 8};
-  //std::vector<uint32_t> b = {idssortedArray, idssortedArray + 8};
+  Qbvh qbvh;
+  constructQbvh(&qbvh, root);
 
-  
+  renderTree(root, &qbvh);
 
   return 0;
 }
 
-void renderTree(Node *tree) {
+SDL_Rect getRect(AABB aabb, float offsetY = 0) {
+  aabb.min *= SCREEN_WIDTH;
+  aabb.max *= SCREEN_WIDTH;
+
+  aabb.min.y += offsetY;
+  aabb.max.y += offsetY;
+  SDL_Rect rec = {int(aabb.min.x), int(aabb.min.y), int(aabb.max.x - aabb.min.x), int(aabb.max.y - aabb.min.y)};
+  return rec;
+}
+
+
+void renderAABB(SDL_Renderer *renderer, AABB aabb) {
+  SDL_Rect rec = getRect(aabb);
+  SDL_SetRenderDrawColor(renderer, 150, 0, 0, 50);
+  SDL_RenderDrawRect(renderer, &rec);
+}
+
+void renderAABB_RED(SDL_Renderer *renderer, AABB aabb) {
+  SDL_Rect rec = getRect(aabb);
+  SDL_SetRenderDrawColor(renderer, 150, 150, 150, 255);
+  SDL_RenderFillRect(renderer, &rec);
+  SDL_SetRenderDrawColor(renderer, 0, 150, 0, 255);
+  SDL_RenderDrawRect(renderer, &rec);
+}
+void renderNode4(SDL_Renderer *renderer, Qbvh *qbvh, uint32_t index) {
+  Node4 node = qbvh->nodes[index];
+  for (int i = 0; i < 4; i++) {
+    if (node.children[i] > 0) {
+      renderNode4(renderer, qbvh, node.children[i]);
+    } else if (node.leafs[i]) {
+      SDL_Rect rec = getRect(node.leafs[i]->aabb, 200.0f);
+      SDL_SetRenderDrawColor(renderer, 0, 150, 150, 255);
+      SDL_RenderFillRect(renderer, &rec);
+      SDL_SetRenderDrawColor(renderer, 0, 0, 150, 255);
+      SDL_RenderDrawRect(renderer, &rec);
+    }
+  }
+}
+
+void renderNode(SDL_Renderer *renderer, Node *node, int depth) {
+
+  SDL_Rect rec = getRect(node->aabb);
+  if (node->childA == nullptr) {
+    SDL_SetRenderDrawColor(renderer, 0, 150, 150, 255);
+    SDL_RenderFillRect(renderer, &rec);
+    SDL_SetRenderDrawColor(renderer, 0, 0, 150, 255);
+    SDL_RenderDrawRect(renderer, &rec);
+  } else {
+    renderNode(renderer, node->childA, depth + 1);
+    renderNode(renderer, node->childB, depth + 1);
+  }
+}
+
+void renderTree(Node *tree, Qbvh *qbvh) {
   if (SDL_Init(SDL_INIT_EVERYTHING) != 0) {
     exit(1);
   }
@@ -431,7 +449,32 @@ void renderTree(Node *tree) {
 
     SDL_SetRenderDrawColor(renderer, 242, 242, 242, 255);
     SDL_RenderClear(renderer);
-    // renderNode(renderer, tree);
+    //renderNode(renderer, tree, 0);
+    //renderNode4(renderer, qbvh, 0);
+
+    int x, y;
+    Uint32 buttons;
+
+    SDL_PumpEvents(); // make sure we have the latest mouse state.
+
+    buttons = SDL_GetMouseState(&x, &y);
+
+    glm::vec3 positions = {x/float(SCREEN_WIDTH), y/float(SCREEN_HEIGHT), 0.1};
+    AABB aabb = {{positions - glm::vec3{0.05}}, {positions + glm::vec3{0.05}}};
+    //auto res = traverseIterative(tree, aabb);
+    uint64_t start = SDL_GetPerformanceCounter();
+    auto res = traverseIterative4(qbvh, aabb);
+    uint64_t end = SDL_GetPerformanceCounter();
+    
+    float secondsElapsed = (end - start) / (float)SDL_GetPerformanceFrequency();
+    
+    printf("%f\n", secondsElapsed);
+
+    for (int i = 0; i < res.size(); i++) {
+      renderAABB_RED(renderer, res[i]);
+    }
+    renderAABB(renderer, aabb);
+
     SDL_RenderPresent(renderer);
   }
   SDL_DestroyRenderer(renderer);
