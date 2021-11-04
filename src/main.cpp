@@ -60,7 +60,6 @@ glm::vec3 aabbCenter(AABB bounds) {
 #define SCREEN_WIDTH 1000
 #define SCREEN_HEIGHT 1000
 
-
 namespace timer {
 typedef std::chrono::time_point<std::chrono::high_resolution_clock> Time;
 
@@ -170,6 +169,92 @@ bool isLeaf(Node *node) {
   return node->childA == nullptr && node->childB == nullptr;
 }
 
+struct Ray {
+  glm::vec3 O;
+  glm::vec3 rD;
+};
+
+struct AABB4 {
+  union {
+    struct {
+      float minX[4], minY[4], minZ[4];
+      float maxX[4], maxY[4], maxZ[4];
+    };
+    struct {
+      __m128 v_minX, v_minY, v_minZ, v_maxX, v_maxY, v_maxZ;
+    };
+  };
+  AABB getAABB(uint32_t i) {
+    return {{minX[i], minY[i], minZ[i]}, {maxX[i], maxY[i], maxZ[i]}};
+  }
+};
+
+void intersection(Ray r, AABB4 b, bool res[4]) {
+  __m128 rx = _mm_set1_ps(r.O.x);
+  __m128 ry = _mm_set1_ps(r.O.y);
+  __m128 rz = _mm_set1_ps(r.O.z);
+
+  __m128 rdx = _mm_set1_ps(r.rD.x);
+  __m128 rdy = _mm_set1_ps(r.rD.y);
+  __m128 rdz = _mm_set1_ps(r.rD.z);
+
+  __m128 zero = _mm_set1_ps(0.0f);
+
+  // x plane
+  __m128 t1 = _mm_mul_ps(_mm_sub_ps(b.v_minX, rx), rdx);
+  __m128 t2 = _mm_mul_ps(_mm_sub_ps(b.v_maxX, rx), rdx);
+
+  __m128 tmin = _mm_min_ps(t1, t2);
+  __m128 tmax = _mm_max_ps(t1, t2);
+
+  // y plane
+  t1 = _mm_mul_ps(_mm_sub_ps(b.v_minY, ry), rdy);
+  t2 = _mm_mul_ps(_mm_sub_ps(b.v_maxY, ry), rdy);
+
+  tmin = _mm_max_ps(tmin, _mm_min_ps(t1, t2));
+  tmax = _mm_min_ps(tmax, _mm_max_ps(t1, t2));
+
+  // z plane
+  t1 = _mm_mul_ps(_mm_sub_ps(b.v_minZ, rz), rdz);
+  t2 = _mm_mul_ps(_mm_sub_ps(b.v_maxZ, rz), rdz);
+
+  tmin = _mm_max_ps(tmin, _mm_min_ps(t1, t2));
+  tmax = _mm_min_ps(tmax, _mm_max_ps(t1, t2));
+
+  __m128 mask = _mm_cmple_ps(_mm_cmple_ps(tmax, tmin), zero);
+  uint32_t *mask_ints = (uint32_t *)&mask;
+  res[0] = mask_ints[0] > 0;
+  res[1] = mask_ints[1] > 0;
+  res[2] = mask_ints[2] > 0;
+  res[3] = mask_ints[3] > 0;
+}
+
+bool intersection(Ray r, AABB b) {
+  float tx1 = (b.min.x - r.O.x) * r.rD.x;
+  float tx2 = (b.max.x - r.O.x) * r.rD.x;
+  float tmin = std::min(tx1, tx2);
+  float tmax = std::max(tx1, tx2);
+  float ty1 = (b.min.y - r.O.y) * r.rD.y;
+  float ty2 = (b.max.y - r.O.y) * r.rD.y;
+  tmin = std::max(tmin, std::min(ty1, ty2));
+  tmax = std::min(tmax, std::max(ty1, ty2));
+  float tz1 = (b.min.z - r.O.z) * r.rD.z;
+  float tz2 = (b.max.z - r.O.z) * r.rD.z;
+  tmin = std::max(tmin, std::min(tz1, tz2));
+  tmax = std::min(tmax, std::max(tz1, tz2));
+  return tmax >= tmin && tmax >= 0;
+}
+
+// bool intersectionSIMD(Ray r, AABB b) {
+//  __m128 t1 = _mm_mul_ps(_mm_sub_ps(node->bmin4, O4), rD4);
+//  __m128 t2 = _mm_mul_ps(_mm_sub_ps(node->bmax4, O4), rD4);
+//  __m128 vmax4 = _mm_max_ps(t1, t2), vmin4 = _mm_min_ps(t1, t2);
+//  float *vmax = (float *)&vmax4, *vmin = (float *)&vmin4;
+//  float tmax = min(vmax[0], min(vmax[1], vmax[2]));
+//  float tmin = max(vmin[0], max(vmin[1], vmin[2]));
+//  return tmax >= tmin && tmax >= 0;
+//}
+
 std::vector<AABB> traverseIterative(Node *root, AABB &queryAABB) {
   std::vector<AABB> res;
 
@@ -213,7 +298,7 @@ std::vector<AABB> traverseIterative(Node *root, AABB &queryAABB) {
 struct Node4 {
   int32_t children[4];
   Node *leafs[4];
-  AABB aabb[4];
+  AABB4 aabbs;
   int count;
 };
 
@@ -221,41 +306,85 @@ struct Qbvh {
   std::vector<Node4> nodes;
 };
 
+// std::vector<AABB> traverseIterative4(Qbvh *bvh, AABB &queryAABB) {
+//  std::vector<AABB> res;
+//
+//  Node4 *stack[64];
+//  Node4 **stackPtr = stack;
+//  *stackPtr++ = nullptr; // push
+//
+//  // Traverse nodes starting from the root.
+//  // bool overlap[4] = {};
+//  // bool shouldTraverse[4] = {};
+//
+//  Node4 *node = &bvh->nodes[0];
+//  while (node != nullptr) {
+//    for (int i = 0; i < node->count; i++) {
+//      if (checkOverlap(queryAABB, node->aabb[i])) {
+//        if (node->leafs[i])
+//          res.push_back(node->leafs[i]->aabb);
+//        else
+//          *stackPtr++ = &bvh->nodes[node->children[i]]; // push
+//      }
+//    }
+//    node = *--stackPtr; // pop
+//  }
+//  return res;
+//}
 
-
-std::vector<AABB> traverseIterative4(Qbvh *bvh, AABB &queryAABB) {
+std::vector<AABB> traverseIterative4(Qbvh *bvh, Ray ray) {
   std::vector<AABB> res;
 
-  // Allocate traversal stack from thread-local memory,
-  // and push NULL to indicate that there are no postponed nodes.
   Node4 *stack[64];
   Node4 **stackPtr = stack;
   *stackPtr++ = nullptr; // push
-  *stackPtr++ = &bvh->nodes[0]; // push
 
   // Traverse nodes starting from the root.
-  bool overlap[4] = {};
-  bool shouldTraverse[4] = {};
+  // bool overlap[4] = {};
+  // bool shouldTraverse[4] = {};
 
-  while (true) {
-    Node4 *node = *--stackPtr; // pop
-    if (node == nullptr)
-      break;
-
-    for (int i = 0; i < node->count; i++) {
-      overlap[i] = checkOverlap(queryAABB, node->aabb[i]);
-    }
+  Node4 *node = &bvh->nodes[0];
+  while (node != nullptr) {
+    bool hit[4];
+    intersection(ray, node->aabbs, hit);
 
     for (int i = 0; i < node->count; i++) {
-      if (overlap[i] && node->leafs[i])
-        res.push_back(node->leafs[i]->aabb);
-    }
-
-    for (int i = 0; i < node->count; i++) {
-      if (overlap[i] && !node->leafs[i]) {
-        *stackPtr++ = &bvh->nodes[node->children[i]]; // push
+      if (hit[i]) {
+        if (node->leafs[i])
+          res.push_back(node->leafs[i]->aabb);
+        else
+          *stackPtr++ = &bvh->nodes[node->children[i]]; // push
       }
     }
+    node = *--stackPtr; // pop
+  }
+  return res;
+}
+
+std::vector<AABB> traverseIterative44(Qbvh *bvh, Ray ray) {
+  std::vector<AABB> res;
+
+  Node4 *stack[64];
+  Node4 **stackPtr = stack;
+  *stackPtr++ = nullptr; // push
+
+  // Traverse nodes starting from the root.
+  // bool overlap[4] = {};
+  // bool shouldTraverse[4] = {};
+
+  Node4 *node = &bvh->nodes[0];
+  while (node != nullptr) {
+
+    for (int i = 0; i < node->count; i++) {
+      bool hit = intersection(ray, node->aabbs.getAABB(i));
+      if (hit) {
+        if (node->leafs[i])
+          res.push_back(node->leafs[i]->aabb);
+        else
+          *stackPtr++ = &bvh->nodes[node->children[i]]; // push
+      }
+    }
+    node = *--stackPtr; // pop
   }
   return res;
 }
@@ -279,12 +408,11 @@ Node *generateHirarchy(std::vector<uint32_t> &sortedMortonCodes, std::vector<AAB
   return node;
 }
 
-
 int constructQbvh(Qbvh *bvh, Node *node) {
   Node *linearChildIndices[4];
   AABB linearChildAabbs[4];
   int childCount = 0;
-  
+
   {
     Node *currentNode = node->childA;
     if (!isLeaf(currentNode)) {
@@ -318,7 +446,14 @@ int constructQbvh(Qbvh *bvh, Node *node) {
   Node4 result = {};
   result.count = childCount;
   for (int i = 0; i < childCount; i++) {
-    result.aabb[i] = linearChildAabbs[i];
+    result.aabbs.minX[i] = linearChildAabbs[i].min[0];
+    result.aabbs.maxX[i] = linearChildAabbs[i].max[0];
+
+    result.aabbs.minY[i] = linearChildAabbs[i].min[1];
+    result.aabbs.maxY[i] = linearChildAabbs[i].max[1];
+
+    result.aabbs.minZ[i] = linearChildAabbs[i].min[2];
+    result.aabbs.maxZ[i] = linearChildAabbs[i].max[2];
   }
   size_t currentNodeIndex = bvh->nodes.size();
   bvh->nodes.push_back(result);
@@ -344,13 +479,13 @@ int main() {
   std::vector<AABB> aabbs(count);
   std::vector<uint32_t> mortonCodes(count);
   for (int i = 0; i < count; i++) {
-    //if (i == 0)
-    //  positions[i] = {0.1, 0.1, 0.1};
-    //if (i == 1)
+    // if (i == 0)
+    //  positions[i] = {0.5, 0.5, 0.1};
+    // if (i == 1)
     //  positions[i] = {0.5, 0.1, 0.1};
-    //if (i == 2)
+    // if (i == 2)
     //  positions[i] = {0.8, 0.1, 0.1};
-    //if (i == 3)
+    // if (i == 3)
     //  positions[i] = {0.9, 0.1, 0.1};
 
     positions[i] = {rand() / float(RAND_MAX), rand() / float(RAND_MAX), 0.1};
@@ -380,7 +515,6 @@ SDL_Rect getRect(AABB aabb, float offsetY = 0) {
   SDL_Rect rec = {int(aabb.min.x), int(aabb.min.y), int(aabb.max.x - aabb.min.x), int(aabb.max.y - aabb.min.y)};
   return rec;
 }
-
 
 void renderAABB(SDL_Renderer *renderer, AABB aabb) {
   SDL_Rect rec = getRect(aabb);
@@ -449,8 +583,8 @@ void renderTree(Node *tree, Qbvh *qbvh) {
 
     SDL_SetRenderDrawColor(renderer, 242, 242, 242, 255);
     SDL_RenderClear(renderer);
-    //renderNode(renderer, tree, 0);
-    //renderNode4(renderer, qbvh, 0);
+    renderNode(renderer, tree, 0);
+    // renderNode4(renderer, qbvh, 0);
 
     int x, y;
     Uint32 buttons;
@@ -459,16 +593,26 @@ void renderTree(Node *tree, Qbvh *qbvh) {
 
     buttons = SDL_GetMouseState(&x, &y);
 
-    glm::vec3 positions = {x/float(SCREEN_WIDTH), y/float(SCREEN_HEIGHT), 0.1};
+    glm::vec3 positions = {x / float(SCREEN_WIDTH), y / float(SCREEN_HEIGHT), 0.1};
     AABB aabb = {{positions - glm::vec3{0.05}}, {positions + glm::vec3{0.05}}};
-    //auto res = traverseIterative(tree, aabb);
-    uint64_t start = SDL_GetPerformanceCounter();
-    auto res = traverseIterative4(qbvh, aabb);
-    uint64_t end = SDL_GetPerformanceCounter();
-    
-    float secondsElapsed = (end - start) / (float)SDL_GetPerformanceFrequency();
-    
-    printf("%f\n", secondsElapsed);
+
+    Ray ray;
+    ray.O = positions;
+    ray.O.z = 1;
+    ray.rD = {1 / 1e-20, 1 / 1e-20, 1 / -1.0f};
+    uint64_t start1 = SDL_GetPerformanceCounter();
+    auto res = traverseIterative4(qbvh, ray);
+    uint64_t end1 = SDL_GetPerformanceCounter();
+
+    uint64_t start2 = SDL_GetPerformanceCounter();
+    auto res2 = traverseIterative44(qbvh, ray);
+    uint64_t end2 = SDL_GetPerformanceCounter();
+
+    float secondsElapsed1 = (end1 - start1) / (float)SDL_GetPerformanceFrequency();
+    float secondsElapsed2 = (end2 - start2) / (float)SDL_GetPerformanceFrequency();
+
+    printf("%u %f %f %u %u\n", secondsElapsed1 < secondsElapsed2, secondsElapsed1, secondsElapsed2,
+           (uint32_t)res.size(), (uint32_t)res2.size());
 
     for (int i = 0; i < res.size(); i++) {
       renderAABB_RED(renderer, res[i]);
